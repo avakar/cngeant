@@ -1,8 +1,15 @@
+#include <WinSock2.h>
+#include <afunix.h>
+
 #include "agent.h"
+#include "cygwin_socket.h"
+
+#include <filesystem>
 
 #include <windows.h>
 #include "resource.h"
 
+#include <random>
 #include <system_error>
 
 using namespace cngeant;
@@ -237,13 +244,13 @@ static LRESULT CALLBACK main_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM
 				AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
 				UINT_PTR id = 0x100;
-				for (key_info const & key : keys)
+				for (key_ref const & key : keys)
 				{
-					std::string key_label = key.comment;
+					std::string key_label(key.comment());
 					key_label.append(" (");
-					key_label.append(key.algo_id);
+					key_label.append(key.algo_id());
 					
-					if (key.is_hw)
+					if (key.is_hw())
 						key_label.append("-tpm");
 					key_label.append(")");
 
@@ -274,13 +281,12 @@ static LRESULT CALLBACK main_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM
 
 			if (r >= 0x4100)
 			{
-				key_info const & key = keys[r - 0x4100];
-				if (MessageBoxW(hwnd, L"The key will be deleted. This operation cannot be done. Are you sure?", L"Delete key", MB_ICONQUESTION | MB_YESNO) == IDYES)
-					ag->delete_key(r - 0x4100);
+				if (MessageBoxW(hwnd, L"The key will be deleted. This operation cannot be undone. Are you sure?", L"Delete key", MB_ICONQUESTION | MB_YESNO) == IDYES)
+					ag->delete_key(keys[r - 0x4100]);
 			}
 			else if (r >= 0x100)
 			{
-				key_info const & key = keys[r - 0x100];
+				key_ref const & key = keys[r - 0x100];
 				copy_to_clipboard(key.get_public_key(), hwnd);
 			}
 			else if (r == 3)
@@ -307,14 +313,22 @@ static LRESULT CALLBACK main_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM
 	return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
 
+#include <thread>
+
+using namespace std::literals;
+
 int WINAPI wWinMain(HINSTANCE hinstance, HINSTANCE, LPWSTR, int)
 {
 	try
 	{
-		if (FindWindowW(L"Pageant", L"Pageant"))
-			throw std::runtime_error("A Pageant-like service is already running.");
+		WSADATA wsd;
+		int err = WSAStartup(MAKEWORD(2, 2), &wsd);
+		if (err)
+			throw std::system_error(err, std::system_category());
 
 		agent ag;
+
+		cygwin_sock_server ssh_agent(L"cngeant.sock", ag);
 
 		WNDCLASSEXW wce = { sizeof wce };
 		wce.lpfnWndProc = &main_wnd_proc;

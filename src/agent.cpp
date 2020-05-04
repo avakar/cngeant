@@ -51,32 +51,46 @@ static T _ncrypt_get_property(NCRYPT_HANDLE h, LPCWSTR propery_name)
 	return value;
 }
 
+static std::vector<char> _ncrypt_get_property(NCRYPT_HANDLE h, LPCWSTR propery_name)
+{
+	std::vector<char> value;
+
+	DWORD ret_len;
+	ncrypt_try NCryptGetProperty(h, propery_name, nullptr, 0, &ret_len, NCRYPT_SILENT_FLAG);
+
+	value.resize(ret_len);
+	ncrypt_try NCryptGetProperty(h, propery_name, (PBYTE)value.data(), value.size(), &ret_len, NCRYPT_SILENT_FLAG);
+
+	value.resize(ret_len);
+	return value;
+}
+
 struct pubkey_blob_comparator
 {
-	bool operator()(key_info const & lhs, key_info const & rhs) const
+	bool operator()(key_ref const & lhs, key_ref const & rhs) const
 	{
-		return lhs.public_blob < rhs.public_blob;
+		return lhs.public_blob() < rhs.public_blob();
 	}
 
-	bool operator()(std::string_view lhs, key_info const & rhs) const
+	bool operator()(std::string_view lhs, key_ref const & rhs) const
 	{
-		return lhs < rhs.public_blob;
+		return lhs < rhs.public_blob();
 	}
 
-	bool operator()(key_info const & lhs, std::string_view rhs) const
+	bool operator()(key_ref const & lhs, std::string_view rhs) const
 	{
-		return lhs.public_blob < rhs;
+		return lhs.public_blob() < rhs;
 	}
 };
 
-std::vector<char> _export_key(NCRYPT_KEY_HANDLE key)
+std::vector<char> _export_key(NCRYPT_KEY_HANDLE key, LPCWSTR blob_type = BCRYPT_PUBLIC_KEY_BLOB)
 {
 	DWORD export_size;
-	ncrypt_try NCryptExportKey(key, 0, BCRYPT_PUBLIC_KEY_BLOB, nullptr, nullptr, 0, &export_size, 0);
+	ncrypt_try NCryptExportKey(key, 0, blob_type, nullptr, nullptr, 0, &export_size, 0);
 
 	std::vector<char> exported_public_key;
 	exported_public_key.resize(export_size);
-	ncrypt_try NCryptExportKey(key, 0, BCRYPT_PUBLIC_KEY_BLOB, nullptr,
+	ncrypt_try NCryptExportKey(key, 0, blob_type, nullptr,
 		(PBYTE)exported_public_key.data(), exported_public_key.size(), &export_size, 0);
 
 	return exported_public_key;
@@ -268,6 +282,41 @@ void _update_ecdsa_p521_key_info(key_info & ki)
 	};
 }
 
+void _update_ec25519_key_info(key_info & ki)
+{
+	ki.algo_id = "ssh-ed25519";
+
+	auto pubkey = _export_key(ki.key.get(), BCRYPT_ECCPUBLIC_BLOB);
+	BCRYPT_ECCKEY_BLOB * blob = (BCRYPT_ECCKEY_BLOB *)pubkey.data();
+
+	char const * key_data = (char const *)(blob + 1);
+
+	string_ssh_writer wr;
+	wr.append_object(ki.algo_id);
+	wr.append_object({ key_data, blob->cbKey });
+	ki.public_blob = std::move(wr).str();
+
+	BYTE data[32] = {};
+
+	BYTE sig[64];
+	DWORD sig_size;
+//	ncrypt_try NCryptSignHash(ki.key.get(), nullptr, data, sizeof data, 0, 0, &sig_size, 0);
+
+	ki.sign = [](ssh_writer & wr, bcrypt_algos const & algos, NCRYPT_KEY_HANDLE key, std::string_view tbs, uint32_t flags) {
+		if (flags)
+			throw std::runtime_error("unsupported flags");
+
+		BYTE sig[64];
+		DWORD sig_size;
+		ncrypt_try NCryptSignHash(key, nullptr, (PBYTE)tbs.data(), 32, 0, 0, &sig_size, 0);
+
+		wr.begin_object();
+		wr.append_object("ssh-ed25519");
+		wr.append_object({ (char const *)sig, sig_size });
+		wr.end_object();
+	};
+}
+
 std::wstring _make_key_name(std::string_view comment)
 {
 	auto r = "ssh-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + "-";
@@ -296,6 +345,36 @@ std::string key_info::get_public_key() const
 	return r;
 }
 
+std::string key_ref::get_public_key() const
+{
+	return _key->get_public_key();
+}
+
+std::string_view key_ref::algo_id() const
+{
+	return _key->algo_id;
+}
+
+std::string_view key_ref::comment() const
+{
+	return _key->comment;
+}
+
+std::string_view key_ref::public_blob() const
+{
+	return _key->public_blob;
+}
+
+bool key_ref::is_hw() const
+{
+	return _key->is_hw;
+}
+
+void key_ref::sign(ssh_writer & wr, bcrypt_algos const & algos, std::string_view tbs, uint32_t flags)
+{
+	_key->sign(wr, algos, _key->key.get(), tbs, flags);
+}
+
 agent::agent()
 {
 	auto sw_provider = std::make_shared<ncrypt_handle>();
@@ -318,6 +397,8 @@ agent::agent()
 
 std::vector<std::string> agent::new_key_types()
 {
+	std::scoped_lock _lock(_mutex);
+
 	std::vector<std::string> r;
 	r.reserve(_new_key_types.size());
 	for (auto const & nkt: _new_key_types)
@@ -327,10 +408,12 @@ std::vector<std::string> agent::new_key_types()
 
 void agent::new_key(size_t algo_idx, std::string comment)
 {
-	key_info ki;
-	ki.comment = comment;
-	_new_key_types.at(algo_idx).create_fn(ki);
-	_keys.push_back(std::move(ki));
+	auto ki = std::make_shared<key_info>();
+	ki->comment = comment;
+	_new_key_types.at(algo_idx).create_fn(*ki);
+
+	std::scoped_lock _lock(_mutex);
+	_keys.emplace_back(std::move(ki));
 }
 
 bool agent::process_message(ssh_writer & wr, std::string_view msg)
@@ -345,12 +428,14 @@ bool agent::process_message(ssh_writer & wr, std::string_view msg)
 	{
 	case 11:
 	{
+		std::scoped_lock _lock(_mutex);
+
 		wr.push_back(12);
 		wr.store_u32(_keys.size());
-		for (key_info const & key: _keys)
+		for (key_ref const & key: _keys)
 		{
-			wr.append_object(key.public_blob);
-			wr.append_object(key.comment);
+			wr.append_object(key.public_blob());
+			wr.append_object(key.comment());
 		}
 		return true;
 	}
@@ -363,12 +448,13 @@ bool agent::process_message(ssh_writer & wr, std::string_view msg)
 		if (!msg.empty())
 			flags = _read_u32(msg);
 
+		std::scoped_lock _lock(_mutex);
 		auto [it, last] = std::equal_range(_keys.begin(), _keys.end(), key, pubkey_blob_comparator{});
 		if (it == last)
 			return false;
 
 		wr.push_back(14);
-		it->sign(wr, _algos, it->key.get(), tbs, flags);
+		it->sign(wr, _algos, tbs, flags);
 		return true;
 	}
 	default:
@@ -376,16 +462,20 @@ bool agent::process_message(ssh_writer & wr, std::string_view msg)
 	}
 }
 
-void agent::delete_key(size_t index)
+void agent::delete_key(key_ref key)
 {
-	auto it = _keys.begin() + index;
-	ncrypt_try NCryptDeleteKey(it->key.get(), 0);
-	it->key.release();
-	_keys.erase(it);
+	ncrypt_try NCryptDeleteKey(key._key->key.get(), 0);
+	key._key->key.release();
+
+	std::scoped_lock _lock(_mutex);
+	_keys.erase(
+		std::remove(_keys.begin(), _keys.end(), key),
+		_keys.end());
 }
 
-std::vector<key_info> const & agent::keys() const
+std::vector<key_ref> agent::keys() const
 {
+	std::scoped_lock _lock(_mutex);
 	return _keys;
 }
 
@@ -465,6 +555,28 @@ void agent::_enum_algos(std::shared_ptr<ncrypt_handle> provider, bool is_hw)
 				_update_ecdsa_p521_key_info(ki);
 				});
 		}
+		else if (algo_name == BCRYPT_ECDSA_ALGORITHM)
+		{
+			ncrypt_handle key;
+			ncrypt_try NCryptCreatePersistedKey(provider->get(), ~key, BCRYPT_ECDSA_ALGORITHM, nullptr, 0, 0);
+			auto buf = _ncrypt_get_property(key.get(), NCRYPT_ECC_CURVE_NAME_LIST_PROPERTY);
+			key.reset();
+
+			BCRYPT_ECC_CURVE_NAMES * curve_list = (BCRYPT_ECC_CURVE_NAMES *)buf.data();
+			for (ULONG i = 0; i != curve_list->dwEccCurveNames; ++i)
+			{
+				std::wstring_view curve_name = curve_list->pEccCurveNames[i];
+				if (curve_name == BCRYPT_ECC_CURVE_25519)
+				{
+					add_algo("ssh-ed25519", 125, 64, [this, provider](key_info & ki) {
+						ncrypt_try NCryptCreatePersistedKey(provider->get(), ~ki.key, BCRYPT_ECDSA_ALGORITHM, _make_key_name(ki.comment).c_str(), 0, 0);
+						ncrypt_try NCryptSetProperty(ki.key.get(), NCRYPT_ECC_CURVE_NAME_PROPERTY, (PBYTE)BCRYPT_ECC_CURVE_25519, sizeof BCRYPT_ECC_CURVE_25519, 0);
+						ncrypt_try NCryptFinalizeKey(ki.key.get(), NCRYPT_SILENT_FLAG);
+						_update_ec25519_key_info(ki);
+						});
+				}
+			}
+		}
 	}
 }
 
@@ -489,28 +601,37 @@ void agent::_enum_keys(NCRYPT_PROV_HANDLE provider, bool is_hw)
 
 		std::wstring_view algo_id = key_name->pszAlgid;
 
-		key_info ki;
-		ki.comment = to_utf8(m[1].str());
-		ki.is_hw = is_hw;
-		ncrypt_try NCryptOpenKey(provider, ~ki.key, key_name->pszName, 0, NCRYPT_SILENT_FLAG);
+		auto ki = std::make_shared<key_info>();
+		ki->comment = to_utf8(m[1].str());
+		ki->is_hw = is_hw;
+		ncrypt_try NCryptOpenKey(provider, ~ki->key, key_name->pszName, 0, NCRYPT_SILENT_FLAG);
 
 		if (algo_id == BCRYPT_RSA_ALGORITHM)
 		{
-			_update_rsa_key_info(ki);
+			_update_rsa_key_info(*ki);
 		}
 		else if (algo_id == BCRYPT_ECDSA_P256_ALGORITHM)
 		{
-			_update_ecdsa_p256_key_info(ki);
+			_update_ecdsa_p256_key_info(*ki);
 		}
 		else if (algo_id == BCRYPT_ECDSA_P384_ALGORITHM)
 		{
-			_update_ecdsa_p384_key_info(ki);
+			_update_ecdsa_p384_key_info(*ki);
 		}
 		else if (algo_id == BCRYPT_ECDSA_P521_ALGORITHM)
 		{
-			_update_ecdsa_p521_key_info(ki);
+			_update_ecdsa_p521_key_info(*ki);
 		}
-		_keys.push_back(std::move(ki));
+		else if (algo_id == BCRYPT_ECDH_ALGORITHM)
+		{
+			auto buf = _ncrypt_get_property(ki->key.get(), NCRYPT_ECC_CURVE_NAME_PROPERTY);
+			std::wstring_view curve_name = (wchar_t const *)buf.data();
+
+			if (curve_name == BCRYPT_ECC_CURVE_25519)
+				_update_ec25519_key_info(*ki);
+		}
+
+		_keys.emplace_back(std::move(ki));
 	}
 }
 

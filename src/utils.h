@@ -1,7 +1,11 @@
+#include <initializer_list>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace cngeant {
+
+void update_user_environment(std::initializer_list<std::pair<std::wstring, std::wstring>> env);
 
 std::string format_fingerprint(std::string_view data);
 std::string base16(std::string_view data);
