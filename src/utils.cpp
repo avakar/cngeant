@@ -6,6 +6,25 @@
 
 namespace cngeant {
 
+void update_user_environment(std::initializer_list<std::pair<std::wstring, std::wstring>> env)
+{
+	HKEY env_key;
+	LRESULT err = RegOpenKeyW(HKEY_CURRENT_USER, L"Environment", &env_key);
+	if (err)
+		throw std::system_error(err, std::system_category());
+	defer{ RegCloseKey(env_key); };
+
+	for (auto && [key, value] : env)
+	{
+		err = RegSetValueExW(env_key, key.c_str(), 0, REG_SZ, (BYTE const *)value.c_str(), value.size() * 2 + 2);
+		if (err)
+			throw std::system_error(err, std::system_category());
+	}
+
+	if (!SendMessageW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, (LPARAM)L"Environment"))
+		throw std::system_error(::GetLastError(), std::system_category());
+}
+
 std::string format_fingerprint(std::string_view data)
 {
 	char const digits[] = "0123456789abcdef";
