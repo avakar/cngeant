@@ -12,6 +12,8 @@ add_executable(cngeant WIN32
     src/cygwin_socket.h
     src/ssh_pack.cpp
     src/ssh_pack.h
+    src/unix_socket.cpp
+    src/unix_socket.h
     src/utils.cpp
     src/utils.h
     src/win32_utils.cpp

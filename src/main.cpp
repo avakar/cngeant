@@ -1,8 +1,10 @@
 #include <WinSock2.h>
 #include <afunix.h>
+#include <mswsock.h>
 
 #include "agent.h"
 #include "cygwin_socket.h"
+#include "unix_socket.h"
 
 #include <filesystem>
 
@@ -313,10 +315,6 @@ static LRESULT CALLBACK main_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM
 	return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
 
-#include <thread>
-
-using namespace std::literals;
-
 int WINAPI wWinMain(HINSTANCE hinstance, HINSTANCE, LPWSTR, int)
 {
 	try
@@ -327,8 +325,8 @@ int WINAPI wWinMain(HINSTANCE hinstance, HINSTANCE, LPWSTR, int)
 			throw std::system_error(err, std::system_category());
 
 		agent ag;
-
-		cygwin_sock_server ssh_agent(L"cngeant.sock", ag);
+		unix_sock_server ssh_agent("cngeant.sock", ag);
+		cygwin_sock_server cyg_ssh_agent(L"cngeant.cygsock", ag);
 
 		WNDCLASSEXW wce = { sizeof wce };
 		wce.lpfnWndProc = &main_wnd_proc;
