@@ -559,21 +559,33 @@ void agent::_enum_algos(std::shared_ptr<ncrypt_handle> provider, bool is_hw)
 		{
 			ncrypt_handle key;
 			ncrypt_try NCryptCreatePersistedKey(provider->get(), ~key, BCRYPT_ECDSA_ALGORITHM, nullptr, 0, 0);
-			auto buf = _ncrypt_get_property(key.get(), NCRYPT_ECC_CURVE_NAME_LIST_PROPERTY);
+
+			std::vector<char> buf;
+			try
+			{
+				buf = _ncrypt_get_property(key.get(), NCRYPT_ECC_CURVE_NAME_LIST_PROPERTY);
+			}
+			catch (std::exception const &)
+			{
+			}
+
 			key.reset();
 
-			BCRYPT_ECC_CURVE_NAMES * curve_list = (BCRYPT_ECC_CURVE_NAMES *)buf.data();
-			for (ULONG i = 0; i != curve_list->dwEccCurveNames; ++i)
+			if (buf.size() >= sizeof(BCRYPT_ECC_CURVE_NAMES))
 			{
-				std::wstring_view curve_name = curve_list->pEccCurveNames[i];
-				if (curve_name == BCRYPT_ECC_CURVE_25519)
+				BCRYPT_ECC_CURVE_NAMES * curve_list = (BCRYPT_ECC_CURVE_NAMES *)buf.data();
+				for (ULONG i = 0; i != curve_list->dwEccCurveNames; ++i)
 				{
-					add_algo("ssh-ed25519", 125, 64, [this, provider](key_info & ki) {
-						ncrypt_try NCryptCreatePersistedKey(provider->get(), ~ki.key, BCRYPT_ECDSA_ALGORITHM, _make_key_name(ki.comment).c_str(), 0, 0);
-						ncrypt_try NCryptSetProperty(ki.key.get(), NCRYPT_ECC_CURVE_NAME_PROPERTY, (PBYTE)BCRYPT_ECC_CURVE_25519, sizeof BCRYPT_ECC_CURVE_25519, 0);
-						ncrypt_try NCryptFinalizeKey(ki.key.get(), NCRYPT_SILENT_FLAG);
-						_update_ec25519_key_info(ki);
-						});
+					std::wstring_view curve_name = curve_list->pEccCurveNames[i];
+					if (curve_name == BCRYPT_ECC_CURVE_25519)
+					{
+						add_algo("ssh-ed25519", 125, 64, [this, provider](key_info & ki) {
+							ncrypt_try NCryptCreatePersistedKey(provider->get(), ~ki.key, BCRYPT_ECDSA_ALGORITHM, _make_key_name(ki.comment).c_str(), 0, 0);
+							ncrypt_try NCryptSetProperty(ki.key.get(), NCRYPT_ECC_CURVE_NAME_PROPERTY, (PBYTE)BCRYPT_ECC_CURVE_25519, sizeof BCRYPT_ECC_CURVE_25519, 0);
+							ncrypt_try NCryptFinalizeKey(ki.key.get(), NCRYPT_SILENT_FLAG);
+							_update_ec25519_key_info(ki);
+							});
+					}
 				}
 			}
 		}
