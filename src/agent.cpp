@@ -634,13 +634,27 @@ void agent::_enum_keys(NCRYPT_PROV_HANDLE provider, bool is_hw)
 		{
 			_update_ecdsa_p521_key_info(*ki);
 		}
-		else if (algo_id == BCRYPT_ECDH_ALGORITHM)
+		else if (algo_id == BCRYPT_ECDSA_ALGORITHM || algo_id == BCRYPT_ECDH_ALGORITHM)
 		{
 			auto buf = _ncrypt_get_property(ki->key.get(), NCRYPT_ECC_CURVE_NAME_PROPERTY);
 			std::wstring_view curve_name = (wchar_t const *)buf.data();
 
-			if (curve_name == BCRYPT_ECC_CURVE_25519)
+			if (curve_name == BCRYPT_ECC_CURVE_NISTP256)
+			{
+				_update_ecdsa_p256_key_info(*ki);
+			}
+			else if (curve_name == BCRYPT_ECC_CURVE_NISTP384)
+			{
+				_update_ecdsa_p384_key_info(*ki);
+			}
+			else if (curve_name == BCRYPT_ECC_CURVE_NISTP521)
+			{
+				_update_ecdsa_p521_key_info(*ki);
+			}
+			else if (curve_name == BCRYPT_ECC_CURVE_25519)
+			{
 				_update_ec25519_key_info(*ki);
+			}
 		}
 
 		_keys.emplace_back(std::move(ki));
