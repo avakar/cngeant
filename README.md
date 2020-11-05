@@ -33,7 +33,7 @@ applications after starting cngeant for the first time.
 The AF_UNIX socket can be used by WSL's ssh client. Add the following to your
 `~/.bashrc` file.
 
-    export SSH_AUTH_SOCKET=/mnt/c/Users/$USER/AppData/Local/Temp/cngeant.sock
+    export SSH_AUTH_SOCK=/mnt/c/Users/$USER/AppData/Local/Temp/cngeant.sock
 
 ## Features
 
