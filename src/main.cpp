@@ -93,45 +93,52 @@ static std::wstring _get_default_key_name()
 
 static INT_PTR input_box_dlgproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
-	switch (msg)
+	try
 	{
-	case WM_INITDIALOG:
-	{
-		auto ag = (agent *)lparam;
-		SetWindowLongPtrW(hwnd, DWLP_USER, lparam);
+		switch (msg)
+		{
+		case WM_INITDIALOG:
+		{
+			auto ag = (agent *)lparam;
+			SetWindowLongPtrW(hwnd, DWLP_USER, lparam);
 
-		SetDlgItemTextW(hwnd, IDC_NAME_EDIT, _get_default_key_name().c_str());
-		for (auto && name: ag->new_key_types())
-			SendDlgItemMessageW(hwnd, IDC_TYPE_COMBO, CB_ADDSTRING, 0, (LPARAM)to_utf16(name).c_str());
-		SendDlgItemMessageW(hwnd, IDC_TYPE_COMBO, CB_SETCURSEL, 0, 0);
+			SetDlgItemTextW(hwnd, IDC_NAME_EDIT, _get_default_key_name().c_str());
+			for (auto && name: ag->new_key_types())
+				SendDlgItemMessageW(hwnd, IDC_TYPE_COMBO, CB_ADDSTRING, 0, (LPARAM)to_utf16(name).c_str());
+			SendDlgItemMessageW(hwnd, IDC_TYPE_COMBO, CB_SETCURSEL, 0, 0);
 
-		return TRUE;
+			return TRUE;
+		}
+		case WM_CLOSE:
+			EndDialog(hwnd, 0);
+			return TRUE;
+		case WM_COMMAND:
+			if (lparam && HIWORD(wparam) == BN_CLICKED && LOWORD(wparam) == IDOK)
+			{
+				auto ag = (agent *)GetWindowLongPtrW(hwnd, DWLP_USER);
+
+				std::wstring name;
+				name.resize(MAX_PATH);
+				name.resize(GetDlgItemTextW(hwnd, IDC_NAME_EDIT, name.data(), name.size()));
+
+				auto id = SendDlgItemMessageW(hwnd, IDC_TYPE_COMBO, CB_GETCURSEL, 0, 0);
+				ag->new_key(id, to_utf8(name));
+
+				EndDialog(hwnd, IDOK);
+				return TRUE;
+			}
+
+			if (lparam && HIWORD(wparam) == BN_CLICKED && LOWORD(wparam) == IDCANCEL)
+			{
+				EndDialog(hwnd, IDCANCEL);
+				return TRUE;
+			}
+			break;
+		}
 	}
-	case WM_CLOSE:
-		EndDialog(hwnd, 0);
-		return TRUE;
-	case WM_COMMAND:
-		if (lparam && HIWORD(wparam) == BN_CLICKED && LOWORD(wparam) == IDOK)
-		{
-			auto ag = (agent *)GetWindowLongPtrW(hwnd, DWLP_USER);
-
-			std::wstring name;
-			name.resize(MAX_PATH);
-			name.resize(GetDlgItemTextW(hwnd, IDC_NAME_EDIT, name.data(), name.size()));
-
-			auto id = SendDlgItemMessageW(hwnd, IDC_TYPE_COMBO, CB_GETCURSEL, 0, 0);
-			ag->new_key(id, to_utf8(name));
-
-			EndDialog(hwnd, IDOK);
-			return TRUE;
-		}
-
-		if (lparam && HIWORD(wparam) == BN_CLICKED && LOWORD(wparam) == IDCANCEL)
-		{
-			EndDialog(hwnd, IDCANCEL);
-			return TRUE;
-		}
-		break;
+	catch (std::exception const & e)
+	{
+		MessageBox(hwnd, e.what(), "Error", MB_OK | MB_ICONERROR);
 	}
 
 	return FALSE;
@@ -178,138 +185,145 @@ static void _set_run_entry(wchar_t const * entry_name)
 
 static LRESULT CALLBACK main_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
-	if (msg == WM_CREATE)
+	try
 	{
-		CREATESTRUCT * cs = (CREATESTRUCT *)lparam;
-		SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)cs->lpCreateParams);
-		return 0;
-	}
-
-	auto ag = (agent *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
-
-	if (msg == WM_COPYDATA)
-	{
-		auto cds = (COPYDATASTRUCT const *)lparam;
-		if (cds->dwData != 0x804e50ba || cds->cbData == 0)
-			return FALSE;
-
-		auto data = (char const *)cds->lpData;
-		if (std::find(data, data + cds->cbData, 0) != data + cds->cbData - 1)
-			return FALSE;
-
-		win32_handle hsection{ OpenFileMappingA(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, data) };
-		if (!hsection)
-			throw std::system_error(GetLastError(), std::system_category());
-		win32_mapped_view view_ptr{ MapViewOfFile(hsection.get(), FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, 0) };
-		if (!view_ptr)
-			throw std::system_error(GetLastError(), std::system_category());
-
-		MEMORY_BASIC_INFORMATION mbi;
-		if (!VirtualQuery(view_ptr.get(), &mbi, sizeof mbi))
-			throw std::system_error(GetLastError(), std::system_category());
-
-		size_t view_size = mbi.RegionSize;
-		if (view_size < 4)
-			return FALSE;
-
-		uint32_t msg_size;
-		memcpy_section(&msg_size, view_ptr.get(), 4);
-		msg_size = _byteswap_ulong(msg_size);
-
-		char msg[0x1000];
-		if (msg_size > sizeof msg || view_size - 4 < msg_size)
-			return FALSE;
-
-		memcpy_section(msg, (char const *)view_ptr.get() + 4, msg_size);
-
-		mapped_view_ssh_writer wr((char *)view_ptr.get(), view_size);
-
-		if (!ag->process_message(wr, { msg, msg_size }))
-			return FALSE;
-
-		wr.end_object();
-		return TRUE;
-	}
-
-	if (msg == WM_USER + 1)
-	{
-		if (LOWORD(lparam) == WM_CONTEXTMENU)
+		if (msg == WM_CREATE)
 		{
-			HMENU menu = CreatePopupMenu();
-			defer{ DestroyMenu(menu); };
+			CREATESTRUCT * cs = (CREATESTRUCT *)lparam;
+			SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)cs->lpCreateParams);
+			return 0;
+		}
 
-			AppendMenuW(menu, MF_STRING | MF_ENABLED, 2, L"Generate new key pair");
+		auto ag = (agent *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
 
-			auto const & keys = ag->keys();
-			if (!keys.empty())
+		if (msg == WM_COPYDATA)
+		{
+			auto cds = (COPYDATASTRUCT const *)lparam;
+			if (cds->dwData != 0x804e50ba || cds->cbData == 0)
+				return FALSE;
+
+			auto data = (char const *)cds->lpData;
+			if (std::find(data, data + cds->cbData, 0) != data + cds->cbData - 1)
+				return FALSE;
+
+			win32_handle hsection{ OpenFileMappingA(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, data) };
+			if (!hsection)
+				throw std::system_error(GetLastError(), std::system_category());
+			win32_mapped_view view_ptr{ MapViewOfFile(hsection.get(), FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, 0) };
+			if (!view_ptr)
+				throw std::system_error(GetLastError(), std::system_category());
+
+			MEMORY_BASIC_INFORMATION mbi;
+			if (!VirtualQuery(view_ptr.get(), &mbi, sizeof mbi))
+				throw std::system_error(GetLastError(), std::system_category());
+
+			size_t view_size = mbi.RegionSize;
+			if (view_size < 4)
+				return FALSE;
+
+			uint32_t msg_size;
+			memcpy_section(&msg_size, view_ptr.get(), 4);
+			msg_size = _byteswap_ulong(msg_size);
+
+			char msg[0x1000];
+			if (msg_size > sizeof msg || view_size - 4 < msg_size)
+				return FALSE;
+
+			memcpy_section(msg, (char const *)view_ptr.get() + 4, msg_size);
+
+			mapped_view_ssh_writer wr((char *)view_ptr.get(), view_size);
+
+			if (!ag->process_message(wr, { msg, msg_size }))
+				return FALSE;
+
+			wr.end_object();
+			return TRUE;
+		}
+
+		if (msg == WM_USER + 1)
+		{
+			if (LOWORD(lparam) == WM_CONTEXTMENU)
 			{
+				HMENU menu = CreatePopupMenu();
+				defer{ DestroyMenu(menu); };
+
+				AppendMenuW(menu, MF_STRING | MF_ENABLED, 2, L"Generate new key pair");
+
+				auto const & keys = ag->keys();
+				if (!keys.empty())
+				{
+					AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+
+					UINT_PTR id = 0x100;
+					for (key_ref const & key : keys)
+					{
+						std::string key_label(key.comment());
+						key_label.append(" (");
+						key_label.append(key.algo_id());
+
+						if (key.is_hw())
+							key_label.append("-tpm");
+						key_label.append(")");
+
+						HMENU submenu = CreatePopupMenu();
+						if (!AppendMenuW(menu, MF_STRING | MF_ENABLED | MF_POPUP, (UINT_PTR)submenu, to_utf16(key_label).c_str()))
+						{
+							DestroyMenu(submenu);
+							return FALSE;
+						}
+
+						AppendMenuW(submenu, MF_STRING | MF_ENABLED, id, L"Copy to clipboard");
+						AppendMenuW(submenu, MF_SEPARATOR, 0, nullptr);
+						AppendMenuW(submenu, MF_STRING | MF_ENABLED, 0x4000 | id, L"Delete key...");
+						++id;
+					}
+				}
+
 				AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
-				UINT_PTR id = 0x100;
-				for (key_ref const & key : keys)
+				bool has_run_entry = _has_run_entry(L"cngeant");
+
+				AppendMenuW(menu, MF_STRING | MF_ENABLED | (has_run_entry? MF_CHECKED: 0), 3, L"Run on startup");
+				AppendMenuW(menu, MF_STRING | MF_ENABLED, 1, L"Quit");
+
+				SetForegroundWindow(hwnd);
+				int r = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY, LOWORD(wparam), HIWORD(wparam), 0, hwnd, nullptr);
+				PostMessageW(hwnd, WM_NULL, 0, 0);
+
+				if (r >= 0x4100)
 				{
-					std::string key_label(key.comment());
-					key_label.append(" (");
-					key_label.append(key.algo_id());
-					
-					if (key.is_hw())
-						key_label.append("-tpm");
-					key_label.append(")");
-
-					HMENU submenu = CreatePopupMenu();
-					if (!AppendMenuW(menu, MF_STRING | MF_ENABLED | MF_POPUP, (UINT_PTR)submenu, to_utf16(key_label).c_str()))
-					{
-						DestroyMenu(submenu);
-						return FALSE;
-					}
-
-					AppendMenuW(submenu, MF_STRING | MF_ENABLED, id, L"Copy to clipboard");
-					AppendMenuW(submenu, MF_SEPARATOR, 0, nullptr);
-					AppendMenuW(submenu, MF_STRING | MF_ENABLED, 0x4000 | id, L"Delete key...");
-					++id;
+					if (MessageBoxW(hwnd, L"The key will be deleted. This operation cannot be undone. Are you sure?", L"Delete key", MB_ICONQUESTION | MB_YESNO) == IDYES)
+						ag->delete_key(keys[r - 0x4100]);
+				}
+				else if (r >= 0x100)
+				{
+					key_ref const & key = keys[r - 0x100];
+					copy_to_clipboard(key.get_public_key(), hwnd);
+				}
+				else if (r == 3)
+				{
+					if (has_run_entry)
+						_clear_run_entry(L"cngeant");
+					else
+						_set_run_entry(L"cngeant");
+				}
+				else if (r == 2)
+				{
+					HINSTANCE hinstance = (HINSTANCE)GetWindowLongPtrW(hwnd, GWLP_HINSTANCE);
+					DialogBoxParamW(hinstance, MAKEINTRESOURCEW(IDD_NEW_KEY), hwnd, &input_box_dlgproc, (LPARAM)ag);
+				}
+				else if (r == 1)
+				{
+					PostQuitMessage(0);
 				}
 			}
 
-			AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-
-			bool has_run_entry = _has_run_entry(L"cngeant");
-
-			AppendMenuW(menu, MF_STRING | MF_ENABLED | (has_run_entry? MF_CHECKED: 0), 3, L"Run on startup");
-			AppendMenuW(menu, MF_STRING | MF_ENABLED, 1, L"Quit");
-
-			SetForegroundWindow(hwnd);
-			int r = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY, LOWORD(wparam), HIWORD(wparam), 0, hwnd, nullptr);
-			PostMessageW(hwnd, WM_NULL, 0, 0);
-
-			if (r >= 0x4100)
-			{
-				if (MessageBoxW(hwnd, L"The key will be deleted. This operation cannot be undone. Are you sure?", L"Delete key", MB_ICONQUESTION | MB_YESNO) == IDYES)
-					ag->delete_key(keys[r - 0x4100]);
-			}
-			else if (r >= 0x100)
-			{
-				key_ref const & key = keys[r - 0x100];
-				copy_to_clipboard(key.get_public_key(), hwnd);
-			}
-			else if (r == 3)
-			{
-				if (has_run_entry)
-					_clear_run_entry(L"cngeant");
-				else
-					_set_run_entry(L"cngeant");
-			}
-			else if (r == 2)
-			{
-				HINSTANCE hinstance = (HINSTANCE)GetWindowLongPtrW(hwnd, GWLP_HINSTANCE);
-				DialogBoxParamW(hinstance, MAKEINTRESOURCEW(IDD_NEW_KEY), hwnd, &input_box_dlgproc, (LPARAM)ag);
-			}
-			else if (r == 1)
-			{
-				PostQuitMessage(0);
-			}
+			return TRUE;
 		}
-
-		return TRUE;
+	}
+	catch (std::exception const & e)
+	{
+		MessageBoxA(hwnd, e.what(), "Error", MB_OK | MB_ICONERROR);
 	}
 
 	return DefWindowProcW(hwnd, msg, wparam, lparam);
