@@ -21,7 +21,7 @@ void update_user_environment(std::initializer_list<std::pair<std::wstring, std::
 			throw std::system_error(err, std::system_category());
 	}
 
-	if (!SendMessageW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, (LPARAM)L"Environment"))
+	if (!SendNotifyMessageW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, (LPARAM)L"Environment"))
 		throw std::system_error(::GetLastError(), std::system_category());
 }
 
