@@ -16,13 +16,14 @@ cygwin_sock_server::cygwin_sock_server(std::wstring_view name_in_tmp, agent & ag
 			CloseHandle(stop_event);
 	};
 
+	std::default_random_engine rng_eng;
 	std::uniform_int_distribution<uint32_t> dist;
 
 	uint32_t conn_secret[] = {
-		dist(std::default_random_engine()),
-		dist(std::default_random_engine()),
-		dist(std::default_random_engine()),
-		dist(std::default_random_engine()),
+		dist(rng_eng),
+		dist(rng_eng),
+		dist(rng_eng),
+		dist(rng_eng),
 	};
 
 	wchar_t tmp_path[MAX_PATH + 1];

@@ -1,7 +1,9 @@
 #include "agent.h"
+#include "pem.h"
 #include "utils.h"
 #include <algorithm>
 #include <chrono>
+#include <fstream>
 #include <regex>
 #include <system_error>
 
@@ -296,12 +298,6 @@ void _update_ec25519_key_info(key_info & ki)
 	wr.append_object({ key_data, blob->cbKey });
 	ki.public_blob = std::move(wr).str();
 
-	BYTE data[32] = {};
-
-	BYTE sig[64];
-	DWORD sig_size;
-//	ncrypt_try NCryptSignHash(ki.key.get(), nullptr, data, sizeof data, 0, 0, &sig_size, 0);
-
 	ki.sign = [](ssh_writer & wr, bcrypt_algos const & algos, NCRYPT_KEY_HANDLE key, std::string_view tbs, uint32_t flags) {
 		if (flags)
 			throw std::runtime_error("unsupported flags");
@@ -377,16 +373,21 @@ void key_ref::sign(ssh_writer & wr, bcrypt_algos const & algos, std::string_view
 
 agent::agent()
 {
-	auto sw_provider = std::make_shared<ncrypt_handle>();
-	ncrypt_try NCryptOpenStorageProvider(~*sw_provider, MS_KEY_STORAGE_PROVIDER, 0);
-	this->_enum_algos(sw_provider, false);
-	this->_enum_keys(sw_provider->get(), false);
+	_sw_provider = std::make_shared<ncrypt_handle>();
 
-	auto hw_provider = std::make_shared<ncrypt_handle>();
-	if (SUCCEEDED(NCryptOpenStorageProvider(~*hw_provider, MS_PLATFORM_KEY_STORAGE_PROVIDER, 0)))
+	ncrypt_try NCryptOpenStorageProvider(~*_sw_provider, MS_KEY_STORAGE_PROVIDER, 0);
+	this->_enum_algos(_sw_provider, false);
+	this->_enum_keys(_sw_provider->get(), false);
+
+	_hw_provider = std::make_shared<ncrypt_handle>();
+	if (SUCCEEDED(NCryptOpenStorageProvider(~*_hw_provider, MS_PLATFORM_KEY_STORAGE_PROVIDER, 0)))
 	{
-		this->_enum_algos(hw_provider, true);
-		this->_enum_keys(hw_provider->get(), true);
+		this->_enum_algos(_hw_provider, true);
+		this->_enum_keys(_hw_provider->get(), true);
+	}
+	else
+	{
+		_hw_provider.reset();
 	}
 
 	std::sort(_new_key_types.begin(), _new_key_types.end(), [](new_key_type const & lhs, new_key_type const & rhs) {
@@ -414,6 +415,105 @@ void agent::new_key(size_t algo_idx, std::string comment)
 
 	std::scoped_lock _lock(_mutex);
 	_keys.emplace_back(std::move(ki));
+}
+
+static std::vector<uint8_t> _read_file(std::filesystem::path const & path)
+{
+	std::ifstream fin(path, std::ios::binary);
+	fin.seekg(0, std::ios::end);
+	auto endpos = fin.tellg();
+	fin.seekg(0);
+
+	std::vector<uint8_t> r(endpos);
+	fin.read((char *)r.data(), r.size());
+	return r;
+}
+
+void agent::import_key(std::filesystem::path const & path)
+{
+	auto data = _read_file(path);
+
+	for (auto const & pem: parse_pem(std::string_view{ (char const *)data.data(), data.size() }))
+	{
+		if (pem.label == "RSA PRIVATE KEY")
+		{
+			asn1parser p(pem.data);
+			p = p.open_structure();
+
+			auto version = p.read_int<int>();
+			if (version != 0)
+				throw std::runtime_error("unsupported RSA private key version");
+
+			auto modulus = p.read_big_uint();
+			auto public_exp = p.read_big_uint();
+			auto private_exp = p.read_big_uint();
+			auto prime1 = p.read_big_uint();
+			auto prime2 = p.read_big_uint();
+			auto exp1 = p.read_big_uint();
+			auto exp2 = p.read_big_uint();
+			auto coeff = p.read_big_uint();
+			p.done();
+
+			if (modulus.empty())
+				throw std::runtime_error("zero modulus");
+
+			BCRYPT_RSAKEY_BLOB hdr;
+			hdr.Magic = BCRYPT_RSAFULLPRIVATE_MAGIC;
+			hdr.BitLength = modulus.size() * 8;
+			hdr.cbModulus = modulus.size();
+			hdr.cbPrime1 = prime1.size();
+			hdr.cbPrime2 = prime2.size();
+			hdr.cbPublicExp = public_exp.size();
+
+			std::vector<std::byte> blob(sizeof hdr + hdr.cbModulus * 2 + hdr.cbPublicExp + hdr.cbPrime1 * 3 + hdr.cbPrime2 * 2);
+			memcpy(blob.data(), &hdr, sizeof hdr);
+			std::byte * b = blob.data() + sizeof hdr;
+
+			auto store = [&](std::span<std::uint8_t const> chunk, std::size_t req_size) {
+				if (chunk.size() > req_size)
+					throw std::runtime_error("invalid");
+				memset(b, 0, req_size - chunk.size());
+				b += req_size - chunk.size();
+				memcpy(b, chunk.data(), chunk.size());
+				b += chunk.size();
+			};
+
+			store(public_exp, hdr.cbPublicExp);
+			store(modulus, hdr.cbModulus);
+			store(prime1, hdr.cbPrime1);
+			store(prime2, hdr.cbPrime2);
+			store(exp1, hdr.cbPrime1);
+			store(exp2, hdr.cbPrime2);
+			store(coeff, hdr.cbPrime1);
+			store(private_exp, hdr.cbModulus);
+
+			auto ki = std::make_shared<key_info>();
+			ki->comment = path.stem().string();
+
+			auto try_prov = [&](auto const & provider, bool is_hw) {
+				try
+				{
+					ncrypt_try NCryptCreatePersistedKey(provider->get(), ~ki->key, BCRYPT_RSA_ALGORITHM, _make_key_name(ki->comment).c_str(), 0, 0);
+					ncrypt_try NCryptSetProperty(ki->key.get(), BCRYPT_RSAFULLPRIVATE_BLOB, (PBYTE)blob.data(), blob.size(), NCRYPT_SILENT_FLAG);
+					ncrypt_try NCryptFinalizeKey(ki->key.get(), NCRYPT_SILENT_FLAG);
+					ki->is_hw = is_hw;
+					return true;
+				}
+				catch (...)
+				{
+					return false;
+				}
+			};
+
+			if (!_hw_provider || !try_prov(_hw_provider, true))
+				try_prov(_sw_provider, false);
+
+			_update_rsa_key_info(*ki);
+
+			std::scoped_lock _lock(_mutex);
+			_keys.emplace_back(std::move(ki));
+		}
+	}
 }
 
 bool agent::process_message(ssh_writer & wr, std::string_view msg)

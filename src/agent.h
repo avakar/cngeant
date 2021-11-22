@@ -1,6 +1,7 @@
 #include "ssh_pack.h"
 #include "win32_utils.h"
 
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -80,6 +81,8 @@ struct agent
 	std::vector<std::string> new_key_types();
 	void new_key(size_t algo_idx, std::string comment);
 
+	void import_key(std::filesystem::path const & path);
+
 	bool process_message(ssh_writer & wr, std::string_view msg);
 
 	std::vector<key_ref> keys() const;
@@ -88,6 +91,9 @@ struct agent
 private:
 	void _enum_algos(std::shared_ptr<ncrypt_handle> provider, bool is_hw);
 	void _enum_keys(NCRYPT_PROV_HANDLE provider, bool is_hw);
+
+	std::shared_ptr<ncrypt_handle> _sw_provider;
+	std::shared_ptr<ncrypt_handle> _hw_provider;
 
 	mutable std::mutex _mutex;
 	bcrypt_algos _algos;

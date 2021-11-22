@@ -1,8 +1,10 @@
 #include <WinSock2.h>
 #include <afunix.h>
 #include <mswsock.h>
+#include <ShObjIdl_core.h>
 
 #include "agent.h"
+#include "comptr.h"
 #include "cygwin_socket.h"
 #include "unix_socket.h"
 
@@ -248,6 +250,7 @@ static LRESULT CALLBACK main_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM
 				defer{ DestroyMenu(menu); };
 
 				AppendMenuW(menu, MF_STRING | MF_ENABLED, 2, L"Generate new key pair");
+				AppendMenuW(menu, MF_STRING | MF_ENABLED, 4, L"Import key...");
 
 				auto const & keys = ag->keys();
 				if (!keys.empty())
@@ -307,6 +310,31 @@ static LRESULT CALLBACK main_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM
 					else
 						_set_run_entry(L"cngeant");
 				}
+				else if (r == 4)
+				{
+					com_ptr<IFileDialog> pfd;
+					hrtry CoCreateInstance(CLSID_FileOpenDialog,
+						NULL,
+						CLSCTX_INPROC_SERVER,
+						pfd.iid(), (LPVOID *)~pfd);
+
+					DWORD dwFlags;
+					hrtry pfd->GetOptions(&dwFlags);
+					hrtry pfd->SetOptions(dwFlags | FOS_FORCEFILESYSTEM);
+					HRESULT hr =  pfd->Show(nullptr);
+					if (hr != HRESULT_FROM_WIN32(ERROR_CANCELLED))
+					{
+						hrtry hr;
+
+						com_ptr<IShellItem> res;
+						hrtry pfd->GetResult(~res);
+
+						task_mem<wchar_t> path;
+						hrtry res->GetDisplayName(SIGDN_FILESYSPATH, ~path);
+
+						ag->import_key(path.get());
+					}
+				}
 				else if (r == 2)
 				{
 					HINSTANCE hinstance = (HINSTANCE)GetWindowLongPtrW(hwnd, GWLP_HINSTANCE);
@@ -333,6 +361,10 @@ int WINAPI wWinMain(HINSTANCE hinstance, HINSTANCE, LPWSTR, int)
 {
 	try
 	{
+		HRESULT hr = CoInitialize(nullptr);
+		if (FAILED(hr))
+			throw std::system_error(hr, std::system_category());
+
 		WSADATA wsd;
 		int err = WSAStartup(MAKEWORD(2, 2), &wsd);
 		if (err)
