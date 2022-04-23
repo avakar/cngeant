@@ -458,7 +458,8 @@ bool agent::process_message(ssh_writer & wr, std::string_view msg)
 		return true;
 	}
 	default:
-		return false;
+		wr.push_back(5); // SSH_AGENT_FAILURE
+		return true;
 	}
 }
 
